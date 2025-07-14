@@ -28,6 +28,12 @@ $ cat ~/.autosshrc
 wufeifei|192.168.1.1|root|password|22|1
 ```
 
+# Support login by identity file
+set is_bastion 2
+```bash
+ cat ~/.autosshrc
+yushimeng|192.168.1.1|root|/Users/neolix20250617001/.autossh/rtc2shanghai.pem|22|2
+```
 
 # Usage
 
