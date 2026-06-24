@@ -89,8 +89,13 @@ for server in $AUTO_SSH_CONFIG; do
 			else
 				echo "spawn ssh -p$PORT -X -l "$NAME $IP >> $FILE
 				if [ "$PASS" != "" ]; then
-					echo 'expect "*assword*"' >> $FILE
-					echo 'send   '$PASS"\r" >> $FILE
+					echo 'expect {' >> $FILE
+					echo '    -re {[\$#] ?$} { }' >> $FILE
+					echo '    "*assword*" {' >> $FILE
+					echo '        send   '$PASS"\r" >> $FILE
+					echo '    }' >> $FILE
+					echo '    timeout { }' >> $FILE
+					echo '}' >> $FILE
 					if [ "$2" == 'sudo' ]; then
 						echo 'expect "@"' >> $FILE
 						echo 'send   "sudo su\r"' >> $FILE
