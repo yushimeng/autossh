@@ -14,113 +14,502 @@
 # $ 'server name|192.168.1.1|root|password|22|0' > ~/.autosshrc
 #
 # @usage
-# $ autossh   // List Server
-# $ autossh 1 // Login Num n Server
+# $ autossh                     // List all servers (grouped if [group] headers exist)
+# $ autossh N                   // Login N-th server (global index)
+# $ autossh <group>             // List only servers in <group>
+# $ autossh <group> N           // Login N-th server inside <group>
+# $ autossh ... sudo            // Sudo su after login (extra trailing arg)
+#
+# @config
+# In ~/.autosshrc, blank lines and lines starting with # are ignored.
+# A line shaped like  [group name]  starts a new group; following entries
+# belong to that group until the next header. Entries before any header
+# fall into the "default" group.
 
-AUTO_SSH_CONFIG=`cat ~/.autosshrc`
+RC="$HOME/.autosshrc"
 BORDER_LINE="\033[1;31m############################################################ \033[0m"
-echo -e $BORDER_LINE
-echo -e "\033[1;31m#                     [AUTO SSH]                           # \033[0m"
-echo -e "\033[1;31m#                                                          # \033[0m"
-echo -e "\033[1;31m#                                                          # \033[0m"
-i=0;
 
-if [ "$AUTO_SSH_CONFIG" == "" ]; then
-	echo -e "\033[1;31m#              Config(~/.autosshrc) Not Found              # \033[0m";
+print_border() { echo -e "$BORDER_LINE"; }
+print_header_blank() {
 	echo -e "\033[1;31m#                                                          # \033[0m"
-	echo -e "\033[1;31m#                                                          # \033[0m"
-	echo -e $BORDER_LINE
-else
-	for server in $AUTO_SSH_CONFIG; do
-		i=`expr $i + 1`
-		SERVER=`echo $server | awk -F\| '{ print $1 }'`
-		IP=`echo $server | awk -F\| '{ print $2 }'`
-		NAME=`echo $server | awk -F\| '{ print $3 }'`
-		LINE="\033[1;31m#"\ [$i]\ $SERVER\ -\ $IP':'$NAME
-		MAX_LINE_LENGTH=`expr ${#BORDER_LINE}`
-		CURRENT_LINE_LENGTH=`expr "${#LINE}"`
-		DIS_LINE_LENGTH=`expr $MAX_LINE_LENGTH - $CURRENT_LINE_LENGTH - 9`
-		echo -e $LINE"\c"
-		for n in $(seq $DIS_LINE_LENGTH);
-		do
-		    echo -e " \c"
-		done
-		echo -e "# \033[0m"
-	done
-	echo -e "\033[1;31m#                                                          # \033[0m"
-	echo -e "\033[1;31m#                                                          # \033[0m"
-	echo -e $BORDER_LINE
+}
 
-	# GET INPUT CHOSEN OR GET PARAM
-	if [ "$1" != "" ]; then
-	    no=$1
+if [ ! -s "$RC" ]; then
+	print_border
+	echo -e "\033[1;31m#                     [AUTO SSH]                           # \033[0m"
+	print_header_blank
+	echo -e "\033[1;31m#              Config(~/.autosshrc) Not Found              # \033[0m"
+	print_header_blank
+	print_border
+	exit 1
+fi
+
+# ---- Parse config: parallel arrays SERVERS[] / ENTRY_GROUPS[] ----
+SERVERS=()
+ENTRY_GROUPS=()
+ORDERED_ENTRY_GROUPS=()        # group names in first-seen order
+SEEN_ENTRY_GROUPS_STR="|"      # set membership, "|group1|group2|" form
+current_group="default"
+
+while IFS= read -r line || [ -n "$line" ]; do
+	# strip leading/trailing whitespace
+	line="${line#"${line%%[![:space:]]*}"}"
+	line="${line%"${line##*[![:space:]]}"}"
+	[ -z "$line" ] && continue
+	case "$line" in
+		\#*) continue ;;
+		\[*\])
+			current_group="${line#[}"
+			current_group="${current_group%]}"
+			;;
+		*)
+			SERVERS+=("$line")
+			ENTRY_GROUPS+=("$current_group")
+			case "$SEEN_ENTRY_GROUPS_STR" in
+				*"|$current_group|"*) ;;
+				*)
+					SEEN_ENTRY_GROUPS_STR="$SEEN_ENTRY_GROUPS_STR$current_group|"
+					ORDERED_ENTRY_GROUPS+=("$current_group")
+					;;
+			esac
+			;;
+	esac
+done < "$RC"
+
+group_exists() {
+	case "$SEEN_ENTRY_GROUPS_STR" in
+		*"|$1|"*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+TOTAL=${#SERVERS[@]}
+if [ "$TOTAL" -eq 0 ]; then
+	echo "no servers in $RC"
+	exit 1
+fi
+
+is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# ---- Argument parsing ----
+# Cases:
+#   (none)            -> list all, then prompt
+#   <num>             -> direct, global index;  sudo_a=$2 sudo_b=$3
+#   <group>           -> list only that group, then prompt
+#   <group> <num>     -> direct, group index;   sudo_a=$3 sudo_b=$4
+filter_group=""
+no=""
+arg_a=""
+arg_b=""
+
+if [ -n "$1" ]; then
+	if is_num "$1"; then
+		no="$1"
+		arg_a="$2"
+		arg_b="$3"
 	else
-	    no=0
-	    until [ $no -gt 0 -a $no -le $i ] 2>/dev/null
-	    do
-	        echo -e 'Server Number:\c'
-	        read no
-	    done
+		filter_group="$1"
+		# validate group exists
+		if ! group_exists "$filter_group"; then
+			echo "group '$filter_group' not found. Available groups:"
+			for g in "${ORDERED_ENTRY_GROUPS[@]}"; do echo "  - $g"; done
+			exit 1
+		fi
+		if is_num "$2"; then
+			gn=0
+			for ((idx=0; idx<TOTAL; idx++)); do
+				if [ "${ENTRY_GROUPS[$idx]}" = "$filter_group" ]; then
+					gn=$((gn+1))
+					if [ "$gn" = "$2" ]; then
+						no=$((idx+1))
+						break
+					fi
+				fi
+			done
+			if [ -z "$no" ]; then
+				echo "group '$filter_group' has no entry #$2"
+				exit 1
+			fi
+			arg_a="$3"
+			arg_b="$4"
+		fi
 	fi
 fi
 
-i=0
-for server in $AUTO_SSH_CONFIG; do
-	i=`expr $i + 1`
-	if [ $i -eq $no ] ; then
-		IP=`echo $server | awk -F\| '{ print $2 }'`
-		NAME=`echo $server | awk -F\| '{ print $3 }'`
-		PASS=`echo $server | awk -F\| '{ print $4 }'`
-		PORT=`echo $server | awk -F\| '{ print $5 }'`
-		ISBASTION=`echo $server | awk -F\| '{ print $6 }'`
-		FILE='/tmp/.login.sh'
-		if [ "$PORT" == "" ]; then
-			PORT=10022
-		fi
-        	echo '#!/usr/bin/expect -f' > $FILE
-        	echo 'set timeout 10' >> $FILE
-			echo 'trap {' >> $FILE
-            echo '    set rows [stty rows]' >> $FILE
-            echo '    set cols [stty columns]' >> $FILE
-            echo '    stty rows $rows columns $cols < $spawn_out(slave,name)' >> $FILE
-            echo '} WINCH' >> $FILE
-			if [ "$ISBASTION" == 2 ]; then
-				echo "spawn ssh -p$PORT -X -l "$NAME -i $PASS $IP >> $FILE
-			else
-				echo "spawn ssh -p$PORT -X -l "$NAME $IP >> $FILE
-				if [ "$PASS" != "" ]; then
-					echo 'expect {' >> $FILE
-					echo '    -re {[\$#] ?$} { }' >> $FILE
-					echo '    "*assword*" {' >> $FILE
-					echo '        send   '$PASS"\r" >> $FILE
-					echo '    }' >> $FILE
-					echo '    timeout { }' >> $FILE
-					echo '}' >> $FILE
-					if [ "$2" == 'sudo' ]; then
-						echo 'expect "@"' >> $FILE
-						echo 'send   "sudo su\r"' >> $FILE
-						echo 'expect "password for"' >> $FILE
-						echo 'send   '$PASS"\r" >> $FILE
-					else
-						if [ "$ISBASTION" == 1 ] && [ "$2" != "" ]; then
-								echo 'expect ">"' >> $FILE
-								echo 'send   '$2"\r" >> $FILE
-								echo 'expect "password:"' >> $FILE
-								echo 'send   '$PASS"\r" >> $FILE
-								if [ "$3" == 'sudo' ]; then
-									echo 'expect "@"' >> $FILE
-									echo 'send   "sudo su\r"' >> $FILE
-									echo 'expect "password for"' >> $FILE
-									echo 'send   '$PASS"\r" >> $FILE
-								fi
-						fi
-					fi
-				fi
-			fi
-        	echo 'interact' >> $FILE
-		chmod a+x $FILE
-		$FILE
-		# echo '' > $FILE
-		break;
+# ---- Plain fallback list (used when no TTY) ----
+render_plain_entry_line() {
+	local label="$1" server="$2"
+	local SERVER IP NAME
+	SERVER=$(echo "$server" | awk -F'|' '{print $1}')
+	IP=$(echo "$server"     | awk -F'|' '{print $2}')
+	NAME=$(echo "$server"   | awk -F'|' '{print $3}')
+	printf "  %s %s - %s@%s\n" "$label" "$SERVER" "$NAME" "$IP"
+}
+
+print_plain_list() {
+	local single_group=0
+	if [ ${#ORDERED_ENTRY_GROUPS[@]} -eq 1 ] && [ "${ORDERED_ENTRY_GROUPS[0]}" = "default" ]; then
+		single_group=1
 	fi
-done
+	local last_group="" gn=0 idx label g
+	for ((idx=0; idx<TOTAL; idx++)); do
+		g="${ENTRY_GROUPS[$idx]}"
+		[ -n "$filter_group" ] && [ "$g" != "$filter_group" ] && continue
+		if [ "$single_group" -eq 0 ] && [ "$g" != "$last_group" ]; then
+			printf "\n--- %s ---\n" "$g"
+			last_group="$g"
+			gn=0
+		fi
+		gn=$((gn+1))
+		if [ -n "$filter_group" ]; then label="[$gn]"; else label="[$((idx+1))]"; fi
+		render_plain_entry_line "$label" "${SERVERS[$idx]}"
+	done
+	echo
+}
+
+prompt_pick_number() {
+	while :; do
+		echo -e 'Server Number: \c'
+		read input || exit 1
+		is_num "$input" || continue
+		if [ -n "$filter_group" ]; then
+			local gn=0 idx
+			for ((idx=0; idx<TOTAL; idx++)); do
+				if [ "${ENTRY_GROUPS[$idx]}" = "$filter_group" ]; then
+					gn=$((gn+1))
+					if [ "$gn" = "$input" ]; then no=$((idx+1)); return; fi
+				fi
+			done
+		else
+			if [ "$input" -ge 1 ] && [ "$input" -le "$TOTAL" ]; then no="$input"; return; fi
+		fi
+	done
+}
+
+# ---- TUI ----
+# Visible-row arrays (rebuilt on toggle):
+#   VIS_KIND[i]   "g" or "e"
+#   VIS_IDX[i]    group index (into ORDERED_ENTRY_GROUPS) or entry index (into SERVERS)
+VIS_KIND=()
+VIS_IDX=()
+GROUP_OPEN=()         # per-group 0/1
+GROUP_ENTRY_COUNT=()  # per-group count
+cursor=0
+old_stty=""
+
+tui_rebuild_visible() {
+	VIS_KIND=()
+	VIS_IDX=()
+	local g i gn
+	for ((g=0; g<${#ORDERED_ENTRY_GROUPS[@]}; g++)); do
+		gn="${ORDERED_ENTRY_GROUPS[$g]}"
+		[ -n "$filter_group" ] && [ "$gn" != "$filter_group" ] && continue
+		VIS_KIND+=("g"); VIS_IDX+=("$g")
+		if [ "${GROUP_OPEN[$g]}" = "1" ]; then
+			for ((i=0; i<TOTAL; i++)); do
+				if [ "${ENTRY_GROUPS[$i]}" = "$gn" ]; then
+					VIS_KIND+=("e"); VIS_IDX+=("$i")
+				fi
+			done
+		fi
+	done
+}
+
+ANCHOR_KIND=""
+ANCHOR_IDX=""
+tui_save_anchor() {
+	ANCHOR_KIND="${VIS_KIND[$cursor]}"
+	ANCHOR_IDX="${VIS_IDX[$cursor]}"
+}
+tui_restore_anchor() {
+	local i n=${#VIS_KIND[@]}
+	for ((i=0; i<n; i++)); do
+		if [ "${VIS_KIND[$i]}" = "$ANCHOR_KIND" ] && [ "${VIS_IDX[$i]}" = "$ANCHOR_IDX" ]; then
+			cursor=$i; return
+		fi
+	done
+	# anchor was inside a now-collapsed group: park on its group row
+	if [ "$ANCHOR_KIND" = "e" ]; then
+		local gn="${ENTRY_GROUPS[$ANCHOR_IDX]}" g
+		for ((g=0; g<${#ORDERED_ENTRY_GROUPS[@]}; g++)); do
+			if [ "${ORDERED_ENTRY_GROUPS[$g]}" = "$gn" ]; then
+				for ((i=0; i<n; i++)); do
+					if [ "${VIS_KIND[$i]}" = "g" ] && [ "${VIS_IDX[$i]}" = "$g" ]; then
+						cursor=$i; return
+					fi
+				done
+			fi
+		done
+	fi
+	[ "$cursor" -ge "$n" ] && cursor=$((n-1))
+	[ "$cursor" -lt 0 ] && cursor=0
+}
+
+HEADER_ROWS=0   # how many lines the header banner occupies; set by tui_draw
+
+# Draw a single visible row at its absolute screen line.
+# $1 = visible index, $2 = "1" if this is the cursor row else "0"
+tui_draw_row() {
+	local i="$1" is_cursor="$2"
+	local kind="${VIS_KIND[$i]}" idx="${VIS_IDX[$i]}"
+	local prefix gn cnt arrow SERVER IP NAME
+	local row=$((HEADER_ROWS + i + 1))
+	# move to row, clear the whole line
+	printf '\033[%d;1H\033[2K' "$row"
+	if [ "$is_cursor" = "1" ]; then prefix='\033[1;36m▶\033[0m '; else prefix='  '; fi
+	if [ "$kind" = "g" ]; then
+		gn="${ORDERED_ENTRY_GROUPS[$idx]}"
+		cnt="${GROUP_ENTRY_COUNT[$idx]}"
+		if [ "${GROUP_OPEN[$idx]}" = "1" ]; then arrow='▾'; else arrow='▸'; fi
+		if [ "$is_cursor" = "1" ]; then
+			printf "${prefix}\033[1;33m%s %s\033[0m \033[2m(%d)\033[0m" "$arrow" "$gn" "$cnt"
+		else
+			printf "${prefix}\033[33m%s %s\033[0m \033[2m(%d)\033[0m" "$arrow" "$gn" "$cnt"
+		fi
+	else
+		SERVER=$(echo "${SERVERS[$idx]}" | awk -F'|' '{print $1}')
+		IP=$(echo "${SERVERS[$idx]}"     | awk -F'|' '{print $2}')
+		NAME=$(echo "${SERVERS[$idx]}"   | awk -F'|' '{print $3}')
+		if [ "$is_cursor" = "1" ]; then
+			printf "${prefix}  \033[2m[%d]\033[0m \033[1;37m%s\033[0m \033[2m-\033[0m \033[36m%s\033[0m@\033[32m%s\033[0m" "$((idx+1))" "$SERVER" "$NAME" "$IP"
+		else
+			printf "${prefix}  \033[2m[%d]\033[0m %s \033[2m-\033[0m %s@%s" "$((idx+1))" "$SERVER" "$NAME" "$IP"
+		fi
+	fi
+}
+
+tui_draw() {
+	# home cursor, clear from cursor to end of screen (no whole-screen flash)
+	printf '\033[H\033[J'
+	printf '\033[1;31m AUTO SSH\033[0m  \033[2m%d hosts in %d groups\033[0m\n' "$TOTAL" "${#ORDERED_ENTRY_GROUPS[@]}"
+	printf ' \033[2mj/k 移动  Enter/Space 展开|登录  A 全部展开|折叠  q/Esc 退出\033[0m\n'
+	HEADER_ROWS=3
+	if [ -n "$filter_group" ]; then
+		printf ' \033[2mfilter: %s\033[0m\n' "$filter_group"
+		HEADER_ROWS=$((HEADER_ROWS + 1))
+	fi
+	printf '\n'
+
+	local n=${#VIS_KIND[@]} i is_cursor
+	for ((i=0; i<n; i++)); do
+		if [ "$i" = "$cursor" ]; then is_cursor=1; else is_cursor=0; fi
+		tui_draw_row "$i" "$is_cursor"
+		printf '\n'
+	done
+}
+
+# Move cursor from $1 (old) to $2 (new) with two-row repaint, no flicker.
+tui_move_cursor() {
+	local old="$1" new="$2"
+	[ "$old" = "$new" ] && return
+	tui_draw_row "$old" 0
+	tui_draw_row "$new" 1
+	# park hardware cursor off-screen-ish (column 1 of new row is fine)
+	printf '\033[%d;1H' "$((HEADER_ROWS + new + 1))"
+}
+
+tui_enter() {
+	old_stty=$(stty -g </dev/tty)
+	stty -icanon -echo min 1 time 0 </dev/tty
+	printf '\033[?1049h\033[?25l'
+	trap 'tui_leave; exit 130' INT TERM
+}
+tui_leave() {
+	[ -n "$old_stty" ] && stty "$old_stty" </dev/tty 2>/dev/null
+	printf '\033[?25h\033[?1049l'
+	trap - INT TERM
+}
+
+tui_select() {
+	if [ ! -t 0 ] || [ ! -t 1 ]; then
+		print_plain_list
+		prompt_pick_number
+		return
+	fi
+
+	local NG=${#ORDERED_ENTRY_GROUPS[@]} g
+	local single_default=0
+	if [ "$NG" -eq 1 ] && [ "${ORDERED_ENTRY_GROUPS[0]}" = "default" ]; then
+		single_default=1
+	fi
+
+	for ((g=0; g<NG; g++)); do
+		if [ "$single_default" = "1" ] || [ -n "$filter_group" ]; then
+			GROUP_OPEN[$g]=1
+		else
+			GROUP_OPEN[$g]=0
+		fi
+		GROUP_ENTRY_COUNT[$g]=0
+	done
+	# fill counts
+	local i gn
+	for ((i=0; i<TOTAL; i++)); do
+		gn="${ENTRY_GROUPS[$i]}"
+		for ((g=0; g<NG; g++)); do
+			if [ "${ORDERED_ENTRY_GROUPS[$g]}" = "$gn" ]; then
+				GROUP_ENTRY_COUNT[$g]=$((GROUP_ENTRY_COUNT[$g]+1))
+				break
+			fi
+		done
+	done
+
+	tui_rebuild_visible
+	cursor=0
+	# land on first selectable entry if filter or single-default
+	if [ -n "$filter_group" ] || [ "$single_default" = "1" ]; then
+		[ "${#VIS_KIND[@]}" -gt 1 ] && cursor=1
+	fi
+
+	tui_enter
+	tui_draw
+
+	local k rest n any_closed new_state kind idx old_cursor need_redraw
+	while :; do
+		IFS= read -rsn1 k </dev/tty
+		n=${#VIS_KIND[@]}
+		old_cursor=$cursor
+		need_redraw=0
+		case "$k" in
+			j)
+				[ "$cursor" -lt "$((n-1))" ] && cursor=$((cursor+1))
+				;;
+			k)
+				[ "$cursor" -gt 0 ] && cursor=$((cursor-1))
+				;;
+			g)
+				cursor=0
+				;;
+			G)
+				cursor=$((n-1))
+				;;
+			A)
+				any_closed=0
+				for ((g=0; g<NG; g++)); do
+					[ "${GROUP_OPEN[$g]}" = "0" ] && any_closed=1
+				done
+				new_state=0
+				[ "$any_closed" = "1" ] && new_state=1
+				for ((g=0; g<NG; g++)); do GROUP_OPEN[$g]=$new_state; done
+				tui_save_anchor
+				tui_rebuild_visible
+				tui_restore_anchor
+				need_redraw=1
+				;;
+			''|' ')   # Enter or Space
+				kind="${VIS_KIND[$cursor]}"
+				idx="${VIS_IDX[$cursor]}"
+				if [ "$kind" = "g" ]; then
+					if [ "${GROUP_OPEN[$idx]}" = "1" ]; then
+						GROUP_OPEN[$idx]=0
+					else
+						GROUP_OPEN[$idx]=1
+					fi
+					tui_save_anchor
+					tui_rebuild_visible
+					tui_restore_anchor
+					need_redraw=1
+				else
+					no=$((idx+1))
+					tui_leave
+					return
+				fi
+				;;
+			q)
+				tui_leave
+				exit 0
+				;;
+			$'\e')
+				# arrow key escape sequence, or plain ESC
+				IFS= read -rsn2 -t 1 rest </dev/tty
+				case "$rest" in
+					'[A') [ "$cursor" -gt 0 ] && cursor=$((cursor-1)) ;;
+					'[B') [ "$cursor" -lt "$((n-1))" ] && cursor=$((cursor+1)) ;;
+					'[5') IFS= read -rsn1 -t 1 _r </dev/tty   # PageUp/Dn swallow ~
+					      cursor=$((cursor - 10)); [ "$cursor" -lt 0 ] && cursor=0 ;;
+					'[6') IFS= read -rsn1 -t 1 _r </dev/tty
+					      cursor=$((cursor + 10)); [ "$cursor" -ge "$n" ] && cursor=$((n-1)) ;;
+					'[C'|'[D') ;;
+					*)
+						tui_leave
+						exit 0
+						;;
+				esac
+				;;
+		esac
+		if [ "$need_redraw" = "1" ]; then
+			tui_draw
+		else
+			tui_move_cursor "$old_cursor" "$cursor"
+		fi
+	done
+}
+
+# ---- If no target chosen yet, run picker ----
+if [ -z "$no" ]; then
+	tui_select
+fi
+
+# ---- Resolve target and build expect script ----
+server="${SERVERS[$((no-1))]}"
+IP=$(echo       "$server" | awk -F'|' '{print $2}')
+NAME=$(echo     "$server" | awk -F'|' '{print $3}')
+PASS=$(echo     "$server" | awk -F'|' '{print $4}')
+PORT=$(echo     "$server" | awk -F'|' '{print $5}')
+ISBASTION=$(echo "$server" | awk -F'|' '{print $6}')
+[ -z "$PORT" ] && PORT=10022
+
+FILE='/tmp/.login.sh'
+
+{
+	echo '#!/usr/bin/expect -f'
+	echo 'set timeout 10'
+	echo 'trap {'
+	echo '    set rows [stty rows]'
+	echo '    set cols [stty columns]'
+	echo '    stty rows $rows columns $cols < $spawn_out(slave,name)'
+	echo '} WINCH'
+} > "$FILE"
+
+if [ "$ISBASTION" = "2" ]; then
+	echo "spawn ssh -p$PORT -X -l $NAME -i $PASS $IP" >> "$FILE"
+else
+	echo "spawn ssh -p$PORT -X -l $NAME $IP" >> "$FILE"
+	if [ -n "$PASS" ]; then
+		{
+			echo 'expect {'
+			echo '    -re {[\$#] ?$} { }'
+			echo '    "*assword*" {'
+			echo "        send   ${PASS}\\r"
+			echo '    }'
+			echo '    timeout { }'
+			echo '}'
+		} >> "$FILE"
+		if [ "$arg_a" = "sudo" ]; then
+			{
+				echo 'expect "@"'
+				echo 'send   "sudo su\r"'
+				echo 'expect "password for"'
+				echo "send   ${PASS}\\r"
+			} >> "$FILE"
+		elif [ "$ISBASTION" = "1" ] && [ -n "$arg_a" ]; then
+			{
+				echo 'expect ">"'
+				echo "send   ${arg_a}\\r"
+				echo 'expect "password:"'
+				echo "send   ${PASS}\\r"
+			} >> "$FILE"
+			if [ "$arg_b" = "sudo" ]; then
+				{
+					echo 'expect "@"'
+					echo 'send   "sudo su\r"'
+					echo 'expect "password for"'
+					echo "send   ${PASS}\\r"
+				} >> "$FILE"
+			fi
+		fi
+	fi
+fi
+
+echo 'interact' >> "$FILE"
+chmod a+x "$FILE"
+"$FILE"
