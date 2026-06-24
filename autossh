@@ -78,18 +78,18 @@ for server in $AUTO_SSH_CONFIG; do
 			PORT=10022
 		fi
         	echo '#!/usr/bin/expect -f' > $FILE
-        	echo 'set timeout 30' >> $FILE
+        	echo 'set timeout 10' >> $FILE
 			echo 'trap {' >> $FILE
             echo '    set rows [stty rows]' >> $FILE
             echo '    set cols [stty columns]' >> $FILE
             echo '    stty rows $rows columns $cols < $spawn_out(slave,name)' >> $FILE
             echo '} WINCH' >> $FILE
-			if [ "$ISBASTION" == 2 ]; then 
-				echo "spawn ssh -p$PORT -l "$NAME -i $PASS $IP >> $FILE
-			else 
-				echo "spawn ssh -p$PORT -i "$PASS" -l "$NAME $IP >> $FILE
+			if [ "$ISBASTION" == 2 ]; then
+				echo "spawn ssh -p$PORT -X -l "$NAME -i $PASS $IP >> $FILE
+			else
+				echo "spawn ssh -p$PORT -X -l "$NAME $IP >> $FILE
 				if [ "$PASS" != "" ]; then
-					echo 'expect "password:"' >> $FILE
+					echo 'expect "*assword*"' >> $FILE
 					echo 'send   '$PASS"\r" >> $FILE
 					if [ "$2" == 'sudo' ]; then
 						echo 'expect "@"' >> $FILE
@@ -115,7 +115,7 @@ for server in $AUTO_SSH_CONFIG; do
         	echo 'interact' >> $FILE
 		chmod a+x $FILE
 		$FILE
-		echo '' > $FILE
+		# echo '' > $FILE
 		break;
 	fi
 done
